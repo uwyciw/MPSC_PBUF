@@ -315,12 +315,27 @@ MPSC_PBUF_GENERIC_T * MpscPbufAlloc(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t wlen)
 
 void MpscPbufCommit(MPSC_PBUF_BUFFER_T * pBuffer, MPSC_PBUF_GENERIC_T * pItem)
 {
-    uint32_t wlen = pBuffer->getWlen(pItem);
-
     if (pBuffer->takeMutex) pBuffer->takeMutex();
 
     pItem->hdr.valid = 1;
-    pBuffer->wrIdx = IdxInc(pBuffer, pBuffer->wrIdx, wlen);
+
+    while (pBuffer->wrIdx != pBuffer->tmpWrIdx) {
+        MPSC_PBUF_GENERIC_T * pHead =
+            (MPSC_PBUF_GENERIC_T *)&pBuffer->pBuf[pBuffer->wrIdx];
+
+        uint32_t skipLen = GetSkip(pHead);
+        if (skipLen) {
+            pBuffer->wrIdx = IdxInc(pBuffer, pBuffer->wrIdx, skipLen);
+            continue;
+        }
+
+        if (!IsValid(pHead)) {
+            break;
+        }
+
+        pBuffer->wrIdx = IdxInc(pBuffer, pBuffer->wrIdx,
+            pBuffer->getWlen(pHead));
+    }
 
     if (pBuffer->giveMutex) pBuffer->giveMutex();
 }
@@ -450,27 +465,33 @@ const MPSC_PBUF_GENERIC_T * MpscPbufClaim(MPSC_PBUF_BUFFER_T * pBuffer)
 
 void MpscPbufFree(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_GENERIC_T * pItem)
 {
-    uint32_t wlen = pBuffer->getWlen(pItem);
-
     if (pBuffer->takeMutex) pBuffer->takeMutex();
 
     MPSC_PBUF_GENERIC_T * pWitem = (MPSC_PBUF_GENERIC_T *)pItem;
+    uint32_t wlen = pBuffer->getWlen(pItem);
 
     pWitem->hdr.valid = 0;
-    if (!(pBuffer->flags & MPSC_PBUF_MODE_OVERWRITE) ||
-        ((uint32_t *)pItem == &pBuffer->pBuf[pBuffer->rdIdx])) {
-        pWitem->hdr.busy = 0;
-        if (pBuffer->rdIdx == pBuffer->tmpRdIdx) {
-            /* 在声明和释放之间可能添加了很多新数据包，
-             * 导致 rd_idx 再次指向被声明的项。此时 tmp_rd_idx
-             * 指向同一位置。在这种情况下，同时递增 tmp_rd_idx，
-             * 将释放的缓冲区标记为唯一的空闲空间。
-             */
-            pBuffer->tmpRdIdx = IdxInc(pBuffer, pBuffer->tmpRdIdx, wlen);
+    pWitem->hdr.busy = 0;
+    pWitem->skip.len = wlen;
+
+    while (pBuffer->rdIdx != pBuffer->tmpRdIdx) {
+        MPSC_PBUF_GENERIC_T * pHead =
+            (MPSC_PBUF_GENERIC_T *)&pBuffer->pBuf[pBuffer->rdIdx];
+
+        uint32_t skipLen = GetSkip(pHead);
+        if (skipLen) {
+            pBuffer->rdIdx = IdxInc(pBuffer, pBuffer->rdIdx, skipLen);
+            pBuffer->flags &= ~MPSC_PBUF_FULL;
+            continue;
         }
-        RdIdxInc(pBuffer, wlen);
-    } else {
-        pWitem->skip.len = wlen;
+
+        if (pHead->hdr.busy) {
+            break;
+        }
+
+        uint32_t headLen = pHead->skip.len;
+        pBuffer->rdIdx = IdxInc(pBuffer, pBuffer->rdIdx, headLen);
+        pBuffer->flags &= ~MPSC_PBUF_FULL;
     }
 
     if (pBuffer->giveMutex) pBuffer->giveMutex();
