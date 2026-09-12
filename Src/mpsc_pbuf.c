@@ -12,25 +12,15 @@
 /* Includes ------------------------------------------------------------------*/
 #include "mpsc_pbuf.h"
 
-static inline bool IsPowerOfTwo(uint32_t size)
-{
-    return size && ((size & (size - 1)) == 0);
-}
-
-void MpscPbufInit(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_BUFFER_CONFIG_T * pConfig, void (*takeMutex)(void), void (*giveMutex)(void))
+void MpscPbufInit(MPSC_PBUF_BUFFER_T * pBuffer, bool overwriteMode, MpscPbufGetWlen_Cb_T getWlen, uint32_t * pBuf, uint32_t size, void (*takeMutex)(void), void (*giveMutex)(void))
 {
     memset(pBuffer, 0, offsetof(MPSC_PBUF_BUFFER_T, pBuf));
-    pBuffer->getWlen = pConfig->getWlen;
-    pBuffer->notifyDrop = pConfig->notifyDrop;
-    pBuffer->pBuf = pConfig->pBuf;
-    pBuffer->size = pConfig->size;
-    pBuffer->flags = pConfig->flags;
+    pBuffer->getWlen = getWlen;
+    pBuffer->pBuf = pBuf;
+    pBuffer->size = size;
+    pBuffer->flags = overwriteMode ? MPSC_PBUF_MODE_OVERWRITE : 0;
     pBuffer->takeMutex = takeMutex;
     pBuffer->giveMutex = giveMutex;
-
-    if (IsPowerOfTwo(pBuffer->size)) {
-        pBuffer->flags |= MPSC_PBUF_SIZE_POW2;
-    }
 }
 
 /* 计算可用空闲空间或到缓冲区末尾的空闲空间。
@@ -90,11 +80,6 @@ static inline bool IsInvalid(MPSC_PBUF_GENERIC_T * pItem)
 static inline uint32_t IdxInc(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t idx, uint32_t val)
 {
     uint32_t i = idx + val;
-
-    if (pBuffer->flags & MPSC_PBUF_SIZE_POW2) {
-        return i & (pBuffer->size - 1);
-    }
-
     return (i >= pBuffer->size) ? i - pBuffer->size : i;
 }
 
@@ -132,14 +117,34 @@ static void AddSkipItem(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t wlen)
     pBuffer->wrIdx = IdxInc(pBuffer, pBuffer->wrIdx, wlen);
 }
 
-static bool DropItemLocked(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t freeWlen, MPSC_PBUF_GENERIC_T ** ppItemToDrop, uint32_t * pTmpWrIdxShift)
+/**
+ * @brief 丢弃 rdIdx 处的数据包以释放空间。
+ *
+ * 依次处理三种情况：
+ *   1. 遇到跳过包（skip item）：直接推进 rdIdx 释放空间。
+ *   2. 覆盖模式下遇到有效且空闲的数据包：标记为无效并推进索引，
+ *      同时通过 @p pTmpWrIdxShift 告知调用者丢弃造成的 tmpWrIdx 偏移，
+ *      调用者需在释放互斥锁后调用 PostDropAction 完成收尾。
+ *   3. 覆盖模式下遇到有效但正忙（busy）的数据包：无法丢弃，改为
+ *      添加跳过包占位，将所有索引前移至该忙包之后继续寻找可丢弃项。
+ *
+ * @note 调用时必须已持有互斥锁。
+ *
+ * @param pBuffer   缓冲区。
+ * @param freeWlen  到缓冲区末尾的空闲字数（回绕场景下用于填充）。
+ * @param pTmpWrIdxShift 输出参数：丢弃操作导致的 tmpWrIdx 偏移量，
+ *                       仅在真正丢弃了有效数据包时非零。
+ *
+ * @retval true  已释放空间，调用者应重试分配（或后续处理忙包）。
+ * @retval false 无包可丢弃（非覆盖模式或遇到无效包），分配应中止。
+ */
+static bool DropItemLocked(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t freeWlen, uint32_t * pTmpWrIdxShift)
 {
     MPSC_PBUF_GENERIC_T * pItem;
     uint32_t skipWlen;
 
     pItem = (MPSC_PBUF_GENERIC_T *)&pBuffer->pBuf[pBuffer->rdIdx];
     skipWlen = GetSkip(pItem);
-    *ppItemToDrop = NULL;
     *pTmpWrIdxShift = 0;
 
     if (skipWlen) {
@@ -204,7 +209,6 @@ static bool DropItemLocked(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t freeWlen, MPSC
         pBuffer->tmpWrIdx = IdxInc(pBuffer, pBuffer->tmpWrIdx, *pTmpWrIdxShift);
         pBuffer->flags |= MPSC_PBUF_FULL;
         pItem->hdr.valid = 0;
-        *ppItemToDrop = pItem;
     }
 
     return true;
@@ -240,7 +244,6 @@ void MpscPbufPutWord(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_GENERIC_T ite
 {
     bool isCont;
     uint32_t freeWlen;
-    MPSC_PBUF_GENERIC_T * pDroppedItem = NULL;
     uint32_t tmpWrIdxShift = 0;
     uint32_t tmpWrIdxVal = 0;
 
@@ -261,26 +264,16 @@ void MpscPbufPutWord(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_GENERIC_T ite
             pBuffer->wrIdx = IdxInc(pBuffer, pBuffer->wrIdx, 1);
         } else {
             tmpWrIdxVal = pBuffer->tmpWrIdx;
-            isCont = DropItemLocked(pBuffer, freeWlen,
-                &pDroppedItem, &tmpWrIdxShift);
+            isCont = DropItemLocked(pBuffer, freeWlen, &tmpWrIdxShift);
         }
 
         if (pBuffer->giveMutex) pBuffer->giveMutex();
-
-        if (pDroppedItem) {
-            /* 通知数据包被丢弃。 */
-            if (pBuffer->notifyDrop) {
-                pBuffer->notifyDrop(pBuffer, pDroppedItem);
-            }
-            pDroppedItem = NULL;
-        }
     } while (isCont);
 }
 
-MPSC_PBUF_GENERIC_T *MpscPbufAlloc(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t wlen)
+MPSC_PBUF_GENERIC_T * MpscPbufAlloc(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t wlen)
 {
     MPSC_PBUF_GENERIC_T * pItem = NULL;
-    MPSC_PBUF_GENERIC_T * pDroppedItem = NULL;
     bool isCont = true;
     uint32_t freeWlen;
     uint32_t tmpWrIdxShift = 0;
@@ -302,8 +295,7 @@ MPSC_PBUF_GENERIC_T *MpscPbufAlloc(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t wlen)
         isWrap = FreeSpace(pBuffer, &freeWlen);
 
         if (freeWlen >= wlen) {
-            pItem =
-                (MPSC_PBUF_GENERIC_T *)&pBuffer->pBuf[pBuffer->tmpWrIdx];
+            pItem = (MPSC_PBUF_GENERIC_T *)&pBuffer->pBuf[pBuffer->tmpWrIdx];
             pItem->hdr.valid = 0;
             pItem->hdr.busy = 0;
             TmpWrIdxInc(pBuffer, wlen);
@@ -313,18 +305,9 @@ MPSC_PBUF_GENERIC_T *MpscPbufAlloc(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t wlen)
             isCont = true;
         } else if (isCont) {
             tmpWrIdxVal = pBuffer->tmpWrIdx;
-            isCont = DropItemLocked(pBuffer, freeWlen,
-                &pDroppedItem, &tmpWrIdxShift);
+            isCont = DropItemLocked(pBuffer, freeWlen, &tmpWrIdxShift);
         }
         if (pBuffer->giveMutex) pBuffer->giveMutex();
-
-        if (pDroppedItem) {
-            /* 通知数据包被丢弃。 */
-            if (pBuffer->notifyDrop) {
-                pBuffer->notifyDrop(pBuffer, pDroppedItem);
-            }
-            pDroppedItem = NULL;
-        }
     } while (isCont);
 
     return pItem;
@@ -346,7 +329,6 @@ void MpscPbufPutWordExt(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_GENERIC_T 
 {
     static const uint32_t l =
         (uint32_t)(sizeof(item) + sizeof(pData)) / sizeof(uint32_t);
-    MPSC_PBUF_GENERIC_T * pDroppedItem = NULL;
     bool isCont;
     uint32_t tmpWrIdxShift = 0;
     uint32_t tmpWrIdxVal = 0;
@@ -378,26 +360,16 @@ void MpscPbufPutWordExt(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_GENERIC_T 
             isCont = true;
         } else {
             tmpWrIdxVal = pBuffer->tmpWrIdx;
-            isCont = DropItemLocked(pBuffer, freeWlen,
-                &pDroppedItem, &tmpWrIdxShift);
+            isCont = DropItemLocked(pBuffer, freeWlen, &tmpWrIdxShift);
         }
 
         if (pBuffer->giveMutex) pBuffer->giveMutex();
-
-        if (pDroppedItem) {
-            /* 通知数据包被丢弃。 */
-            if (pBuffer->notifyDrop) {
-                pBuffer->notifyDrop(pBuffer, pDroppedItem);
-            }
-            pDroppedItem = NULL;
-        }
     } while (isCont);
 }
 
 void MpscPbufPutData(MPSC_PBUF_BUFFER_T * pBuffer, const uint32_t * pData, uint32_t wlen)
 {
     bool isCont;
-    MPSC_PBUF_GENERIC_T * pDroppedItem = NULL;
     uint32_t tmpWrIdxShift = 0;
     uint32_t tmpWrIdxVal = 0;
 
@@ -425,20 +397,10 @@ void MpscPbufPutData(MPSC_PBUF_BUFFER_T * pBuffer, const uint32_t * pData, uint3
             isCont = true;
         } else {
             tmpWrIdxVal = pBuffer->tmpWrIdx;
-            isCont = DropItemLocked(pBuffer, freeWlen,
-                &pDroppedItem, &tmpWrIdxShift);
+            isCont = DropItemLocked(pBuffer, freeWlen, &tmpWrIdxShift);
         }
 
         if (pBuffer->giveMutex) pBuffer->giveMutex();
-
-        if (pDroppedItem) {
-            /* 通知数据包被丢弃。 */
-            pDroppedItem->hdr.valid = 0;
-            if (pBuffer->notifyDrop) {
-                pBuffer->notifyDrop(pBuffer, pDroppedItem);
-            }
-            pDroppedItem = NULL;
-        }
     } while (isCont);
 }
 

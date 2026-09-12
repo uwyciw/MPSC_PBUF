@@ -9,13 +9,27 @@
   ******************************************************************************
 ***/
 
-#ifndef _MPSC_PACKET_H_
-#define _MPSC_PACKET_H_
+#ifndef _MPSC_PBUF_INTERNAL_H_
+#define _MPSC_PBUF_INTERNAL_H_
 
 /* Includes ------------------------------------------------------------------*/
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+
+/**@defgroup MPSC_PBUF_FLAGS MPSC 包缓冲区标志
+ * @{
+**/
+
+/** @brief 指示缓冲区满时策略的标志。
+ *
+ * 若设置此标志，当从满缓冲区分配时，最旧的数据包将被丢弃。
+ * 若未设置此标志，分配将返回空指针。
+**/
+#define MPSC_PBUF_MODE_OVERWRITE (1U << 0)
+
+/** @brief 指示缓冲区当前已满的标志。 */
+#define MPSC_PBUF_FULL (1U << 1)
 
 /**
  * @brief 多生产者、单消费者包头
@@ -55,4 +69,4 @@ typedef union mpsc_pbuf_generic_t {
 	uint32_t raw;
 } MPSC_PBUF_GENERIC_T;
 
-#endif /* _MPSC_PACKET_H_ */
+#endif /* _MPSC_PBUF_INTERNAL_H_ */

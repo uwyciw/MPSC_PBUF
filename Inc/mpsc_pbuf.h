@@ -13,11 +13,11 @@
 #define _MPSC_PBUF_H_
 
 /* Includes ------------------------------------------------------------------*/
-#include "mpsc_packet.h"
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "mpsc_pbuf_internal.h"
 
 /**
  * @brief 多生产者、单消费者包缓冲区 API
@@ -40,26 +40,6 @@
  * 数据包不再使用时释放。
 **/
 
-/**@defgroup MPSC_PBUF_FLAGS MPSC 包缓冲区标志
- * @{
-**/
-
-/** @brief 指示缓冲区大小为 2 的幂的标志。
- *
- * 当缓冲区大小为 2 的幂时，应用优化。
-**/
-#define MPSC_PBUF_SIZE_POW2 (1U << 0)
-
-/** @brief 指示缓冲区满时策略的标志。
- *
- * 若设置此标志，当从满缓冲区分配时，最旧的数据包将被丢弃。
- * 若未设置此标志，分配将返回空指针。
-**/
-#define MPSC_PBUF_MODE_OVERWRITE (1U << 1)
-
-/** @brief 指示缓冲区当前已满的标志。 */
-#define MPSC_PBUF_FULL (1U << 3)
-
 /**@} */
 
 /* 前向声明 */
@@ -72,15 +52,6 @@ struct mpsc_pbuf_buffer_t;
  * @return 数据包的大小，以 32 位字为单位。
 **/
 typedef uint32_t (*MpscPbufGetWlen_Cb_T)(const MPSC_PBUF_GENERIC_T * pPacket);
-
-/** @brief 数据包被丢弃时的回调。
- *
- * @param pBuffer 包缓冲区。
- *
- * @param pPacket 正在被丢弃的数据包。
- */
-typedef void (*MpscPbufNotifyDrop_Cb_T)(const struct mpsc_pbuf_buffer_t * pBuffer,
-    const MPSC_PBUF_GENERIC_T * pPacket);
 
 /** @brief MPSC 包缓冲区结构体。 */
 typedef struct mpsc_pbuf_buffer_t {
@@ -103,12 +74,6 @@ typedef struct mpsc_pbuf_buffer_t {
     void(*takeMutex)(void);
     void(*giveMutex)(void);
 
-    /** 数据包被丢弃时调用的用户回调。
-     *
-     * 如不需要可设为 NULL。
-     */
-    MpscPbufNotifyDrop_Cb_T notifyDrop;
-
     /** 获取数据包长度的回调。 */
     MpscPbufGetWlen_Cb_T getWlen;
 
@@ -119,29 +84,17 @@ typedef struct mpsc_pbuf_buffer_t {
     uint32_t size;
 } MPSC_PBUF_BUFFER_T;
 
-/** @brief MPSC 包缓冲区配置结构体。 */
-typedef struct mpsc_pbuf_buffer_config_t {
-    /* 用于存储数据包的内存指针。 */
-    uint32_t * pBuf;
-
-    /* 缓冲区大小，以 32 位字为单位。 */
-    uint32_t size;
-
-    /* 回调函数。 */
-    MpscPbufNotifyDrop_Cb_T notifyDrop;
-    MpscPbufGetWlen_Cb_T getWlen;
-
-    /* 配置标志。 */
-    uint32_t flags;
-} MPSC_PBUF_BUFFER_CONFIG_T;
-
 /** @brief 初始化包缓冲区。
  *
  * @param pBuffer 缓冲区。
- *
- * @param pConfig 配置。
+ * @param overwriteMode 若为 true，缓冲区满时丢弃最旧数据包。
+ * @param getWlen 获取数据包长度的回调。
+ * @param pBuf 用户提供的缓冲区存储。
+ * @param size 缓冲区大小，以 32 位字为单位。
+ * @param takeMutex 获取互斥锁函数，可设为 NULL。
+ * @param giveMutex 释放互斥锁函数，可设为 NULL。
  */
-void MpscPbufInit(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_BUFFER_CONFIG_T * pConfig, void (*takeMutex)(void), void (*giveMutex)(void));
+void MpscPbufInit(MPSC_PBUF_BUFFER_T * pBuffer, bool overwriteMode, MpscPbufGetWlen_Cb_T getWlen, uint32_t * pBuf, uint32_t size, void (*takeMutex)(void), void (*giveMutex)(void));
 
 /** @brief 分配数据包。
  *

@@ -24,7 +24,6 @@ MPSC_PBUF/
 │   └── mpsc_pbuf.h     缓冲区结构体与 API 声明
 ├── Src/
 │   └── mpsc_pbuf.c     API 实现
-├── mpsc_pbuf.rst       原始设计文档
 └── LICENSE
 ```
 
