@@ -11,7 +11,6 @@
 - **两步式生产**：Alloc → 填充 → Commit；允许在 Commit 前继续分配新包，允许乱序Commit
 - **覆盖模式**：满时自动丢弃最旧包；正在被消费的包会被安全跳过，释放后自动转为跳过包
 - **无覆盖模式**：满时返回 NULL，由上层决定重试或丢弃
-- **快路径优化 API**：`PutWord` / `PutWordExt` 针对单字 / 单字+指针的小包做了值传递优化
 - **零外部依赖**：仅使用 C11 标准库（`<stdint.h>` `<stdbool.h>` `<stddef.h>` `<string.h>`），通过函数指针注入互斥锁，可适配任意 RTOS 或裸机
 - **任意容量**：索引回绕采用比较-减法实现，缓冲区大小不要求为 2 的幂
 
@@ -94,7 +93,7 @@ typedef struct {
 
 ### 互斥锁注入
 
-核心写入路径（PutWord / Alloc / Commit / PutWordExt / PutData）和读取路径（Claim / Free / IsPending）的临界区都通过 `takeMutex` / `giveMutex` 函数指针保护。传入 `NULL` 时跳过锁操作，适合裸机或单线程场景。
+核心写入路径（Alloc / Commit）和读取路径（Claim / Free / IsPending）的临界区都通过 `takeMutex` / `giveMutex` 函数指针保护。传入 `NULL` 时跳过锁操作，适合裸机或单线程场景。
 
 典型适配：
 
