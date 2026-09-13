@@ -5,7 +5,19 @@
   * @date    2026-09-12
   * @brief   多生产者、单消费者（Multi-Producer, Single-Consumer）环形包缓冲区
   ******************************************************************************
-  *
+  * @attention 消费者需要严格按照Claim->处理->Free->下一次Claim的顺序交替进行，不允许在
+  *            上一个Claim还没有Free时，调用Claim申请新的数据包。
+  * @details 多生产者、单消费者包缓冲区允许分配可变长度的连续空间来存储数据包。
+ *           当空间分配后，用户可以填充数据（被占用的 2 位除外），数据包就绪后提交。
+ *           允许在提交前一个数据包之前分配新的数据包，且允许乱序提交。
+ *           如果缓冲区已满且无法分配数据包，则返回空指针，除非选择了覆盖模式。
+ *           在覆盖模式下，最旧的条目会被丢弃，直到分配成功。
+ *           可能出现待丢弃的候选包正在被占用的情况，此时跳过该包，被占用的包
+ *           在释放时会被转换为跳过包。
+ *           读取数据包分两步进行：首先声明数据包，声明返回缓冲区内数据包的指针；
+ *           数据包不再使用时释放。声明与释放必须严格交替进行。
+**/
+
   ******************************************************************************
 ***/
 
@@ -15,26 +27,10 @@
 /* Includes ------------------------------------------------------------------*/
 #include "mpsc_pbuf_internal.h"
 
-/**
- * @brief 多生产者、单消费者包缓冲区 API
- * @defgroup mpsc_buf MPSC（多生产者、单消费者）包缓冲区 API
- * @ingroup datastructure_apis
-**/
-
-/*
- * 多生产者、单消费者包缓冲区允许分配可变长度的连续空间来存储数据包。
- * 当空间分配后，用户可以填充数据（前 2 位除外），数据包就绪后提交。
- * 允许在提交前一个数据包之前分配新的数据包。
- * 如果缓冲区已满且无法分配数据包，则返回空指针，除非选择了覆盖模式。
- * 在覆盖模式下，最旧的条目会被丢弃（通知用户），直到分配成功。
- * 可能出现待丢弃的候选包正在被占用的情况，此时跳过该包，丢弃下一个包，
- * 被占用的包在释放时标记为无效。
- * 读取数据包分两步进行：首先声明数据包，声明返回缓冲区内数据包的指针；
- * 数据包不再使用时释放。
-**/
-
 /** 
  * @brief 获取数据包长度的回调原型。
+ * @note 该回调在持有互斥锁的临界区内被调用，必须快速返回且无副作用；
+ *       返回值必须与分配该数据包时使用的字数一致。
  * @param pPacket 用户数据包。
  * @return 数据包的大小，以 32 位字为单位。
 **/
@@ -93,44 +89,15 @@ MPSC_PBUF_GENERIC_T * MpscPbufAlloc(MPSC_PBUF_BUFFER_T * pBuffer, uint32_t wlen)
 
 /** 
  * @brief 提交数据包。
+ * @note 提交时内部会设置 valid 位，调用者无需提前设置。
  * @param pBuffer 缓冲区。
  * @param pPacket 由 @ref MpscPbufAlloc 分配的数据包指针。
  */
 void MpscPbufCommit(MPSC_PBUF_BUFFER_T * pBuffer, MPSC_PBUF_GENERIC_T * pPacket);
 
 /** 
- * @brief 将单字数据包放入缓冲区。
- * 该函数针对可放入单个字的数据包进行了优化。
- * 注意：该字的 2 位由缓冲区使用。
- * @param pBuffer 缓冲区。
- * @param word 数据包内容，包含有效位已设置的 MPSC_PBUF_HDR
- * 以及剩余位上的数据。
- */
-void MpscPbufPutWord(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_GENERIC_T word);
-
-/** 
- * @brief 放入由一个字和一个指针组成的数据包。
- * 该函数针对由一个字和一个指针组成的数据包进行了优化。
- * 注意：第一个字的 2 位由缓冲区使用。
- * @param pBuffer 缓冲区。
- * @param word 数据包的第一个字，包含有效位已设置的 MPSC_PBUF_HDR
- * 以及剩余位上的数据。
- * @param pData 用户数据。
- */
-void MpscPbufPutWordExt(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_GENERIC_T word, const void * pData);
-
-/** 
- * @brief 将数据包放入缓冲区。
- * 将数据复制到缓冲区中。
- * 注意：第一个字的 2 位由缓冲区使用。
- * @param pBuffer 缓冲区。
- * @param pData 数据的第一个字必须包含有效位已设置的 MPSC_PBUF_HDR。
- * @param wlen 数据包大小，以字为单位。
- */
-void MpscPbufPutData(MPSC_PBUF_BUFFER_T * pBuffer, const uint32_t * pData, uint32_t wlen);
-
-/** 
  * @brief 声明第一个待处理的数据包。
+ * @note 必须与 @ref MpscPbufFree 严格交替使用：上一个声明的数据包释放之前，不允许再次声明新的数据包。
  * @param pBuffer 缓冲区。
  * @return 指向已声明数据包的指针，若无可用数据包则返回空指针。
  */
@@ -138,8 +105,9 @@ const MPSC_PBUF_GENERIC_T * MpscPbufClaim(MPSC_PBUF_BUFFER_T * pBuffer);
 
 /** 
  * @brief 释放数据包。
+ * @note 必须与 @ref MpscPbufClaim 严格交替使用。
  * @param pBuffer 缓冲区。
- * @param pPacket 数据包。
+ * @param pPacket 由 @ref MpscPbufClaim 声明的数据包指针。
  */
 void MpscPbufFree(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_GENERIC_T * pPacket);
 
