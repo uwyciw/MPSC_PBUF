@@ -76,8 +76,7 @@ typedef struct {
 - **空闲空间** = `rdIdx` 到 `tmpWrIdx` 之间（含回绕）
 - **可读取数据** = `tmpRdIdx` 到 `wrIdx` 之间（含回绕）
 - **满**：`tmpWrIdx` 追上 `rdIdx` 时置 `MPSC_PBUF_FULL` 标志
-- **区分满/空**：牺牲一个字的容量，实际可用 = `size - 1`
-- **顺序约束**：`MpscPbufCommit` 必须按 `MpscPbufAlloc` 的顺序执行；`MpscPbufClaim` 与 `MpscPbufFree` 必须严格交替，乱序会破坏读写索引
+- **顺序约束**：`MpscPbufClaim` 与 `MpscPbufFree` 必须严格交替，乱序会破坏读写索引
 
 ### 跳过包（Skip Packet）
 
@@ -126,7 +125,7 @@ void MpscPbufInit(MPSC_PBUF_BUFFER_T * pBuffer,
 | `overwriteMode` | `true` 开启覆盖模式；`false` 时缓冲区满则分配返回 `NULL` |
 | `getWlen` | 回调：给定数据包指针返回其字数。在临界区内被调用，必须快速、无副作用，且返回值与分配时的长度一致 |
 | `pBuf` | 用户提供的 `uint32_t` 数组，作为缓冲区存储 |
-| `size` | 数组长度（32 位字数），实际可用 `size - 1` |
+| `size` | 数组长度（32 位字数） |
 | `takeMutex` / `giveMutex` | 互斥锁获取 / 释放函数，可为 `NULL`（裸机 / 单线程场景） |
 
 ### 生产（两步法）
@@ -139,21 +138,6 @@ if (!pkt) { /* 满了 */ }
 // 第二步：填充数据后提交（Commit 内部会设置 valid 位，无需手动设置）
 ((my_packet_t *)pkt)->length = 7;
 MpscPbufCommit(&buf, pkt);
-```
-
-### 生产（单步快路径）
-
-```c
-// 单字小包（第一个字里必须预先设置好 valid=1）
-MPSC_PBUF_GENERIC_T word = { .hdr = { .valid = 1, .data = 0x1234 } };
-MpscPbufPutWord(&buf, word);
-
-// 单字 + 外部指针
-MpscPbufPutWordExt(&buf, word, (void *)external_data);
-
-// 多字拷贝
-uint32_t raw[4] = { 0x80000001, 0xDEADBEEF, 0xCAFEBABE, 0x12345678 };
-MpscPbufPutData(&buf, raw, 4);
 ```
 
 ### 消费
