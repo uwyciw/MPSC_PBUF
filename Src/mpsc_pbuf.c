@@ -387,8 +387,7 @@ void MpscPbufPutData(MPSC_PBUF_BUFFER_T * pBuffer, const uint32_t * pData, uint3
         isWrap = FreeSpace(pBuffer, &freeWlen);
 
         if (freeWlen >= wlen) {
-            memcpy(&pBuffer->pBuf[pBuffer->tmpWrIdx], pData,
-                wlen * sizeof(uint32_t));
+            memcpy(&pBuffer->pBuf[pBuffer->tmpWrIdx], pData,wlen * sizeof(uint32_t)); 
             pBuffer->wrIdx = IdxInc(pBuffer, pBuffer->wrIdx, wlen);
             TmpWrIdxInc(pBuffer, wlen);
             isCont = false;
@@ -417,8 +416,7 @@ const MPSC_PBUF_GENERIC_T * MpscPbufClaim(MPSC_PBUF_BUFFER_T * pBuffer)
         if (pBuffer->takeMutex) pBuffer->takeMutex();
 
         (void)Available(pBuffer, &availableWlen);
-        pItem = (MPSC_PBUF_GENERIC_T *)
-            &pBuffer->pBuf[pBuffer->tmpRdIdx];
+        pItem = (MPSC_PBUF_GENERIC_T *)&pBuffer->pBuf[pBuffer->tmpRdIdx];
 
         if (!availableWlen || IsInvalid(pItem)) {
             pItem = NULL;
@@ -426,18 +424,14 @@ const MPSC_PBUF_GENERIC_T * MpscPbufClaim(MPSC_PBUF_BUFFER_T * pBuffer)
             uint32_t skipWlen = GetSkip(pItem);
 
             if (skipWlen || !IsValid(pItem)) {
-                uint32_t inc =
-                    skipWlen ? skipWlen : pBuffer->getWlen(pItem);
+                uint32_t inc = skipWlen ? skipWlen : pBuffer->getWlen(pItem);
 
-                pBuffer->tmpRdIdx =
-                    IdxInc(pBuffer, pBuffer->tmpRdIdx, inc);
+                pBuffer->tmpRdIdx = IdxInc(pBuffer, pBuffer->tmpRdIdx, inc);
                 RdIdxInc(pBuffer, inc);
                 isCont = true;
             } else {
                 pItem->hdr.busy = 1;
-                pBuffer->tmpRdIdx =
-                    IdxInc(pBuffer, pBuffer->tmpRdIdx,
-                        pBuffer->getWlen(pItem));
+                pBuffer->tmpRdIdx = IdxInc(pBuffer, pBuffer->tmpRdIdx, pBuffer->getWlen(pItem));
             }
         }
 
@@ -457,8 +451,7 @@ void MpscPbufFree(MPSC_PBUF_BUFFER_T * pBuffer, const MPSC_PBUF_GENERIC_T * pIte
     MPSC_PBUF_GENERIC_T * pWitem = (MPSC_PBUF_GENERIC_T *)pItem;
 
     pWitem->hdr.valid = 0;
-    if (!(pBuffer->flags & MPSC_PBUF_MODE_OVERWRITE) ||
-        ((uint32_t *)pItem == &pBuffer->pBuf[pBuffer->rdIdx])) {
+    if (!(pBuffer->flags & MPSC_PBUF_MODE_OVERWRITE) || ((uint32_t *)pItem == &pBuffer->pBuf[pBuffer->rdIdx])) {
         pWitem->hdr.busy = 0;
         if (pBuffer->rdIdx == pBuffer->tmpRdIdx) {
             /* 在声明和释放之间可能添加了很多新数据包，
